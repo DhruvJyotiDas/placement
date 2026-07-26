@@ -1,0 +1,251 @@
+# ══════════════════════════════════════════════════════════════════════
+# Placement Portal Application (PPA) — API Resource Endpoints
+# Author: Dhruv Jyoti Das | Roll Number: 23f2001463
+#
+# Base URL (development): http://localhost:5000
+# Auth: Bearer JWT in the "Authorization" header, except where marked public.
+# Every entry below is: endpoint, method, description (table-style, per group).
+# ══════════════════════════════════════════════════════════════════════
+
+api_version: "2.0"
+base_url: "http://localhost:5000"
+
+groups:
+
+  # ── Authentication (public) ────────────────────────────────────────
+  - group: Auth
+    blueprint: routes/auth.py
+    endpoints:
+      - endpoint: /api/register
+        method: POST
+        description: >
+          Self-register as a student or company. Admin cannot be registered
+          through this endpoint under any circumstances.
+
+      - endpoint: /api/login
+        method: POST
+        description: >
+          Authenticate with email + password. Returns a JWT access token,
+          the user's role, and their id.
+
+  # ── Admin ───────────────────────────────────────────────────────────
+  - group: Admin
+    blueprint: routes/admin.py
+    auth: "role_required('admin')"
+    endpoints:
+      - endpoint: /api/admin/stats
+        method: GET
+        description: >
+          Dashboard headline counts — total students, companies, drives,
+          applications, pending approvals, students selected. Cached 120s.
+
+      - endpoint: /api/admin/report
+        method: POST
+        description: >
+          Admin-triggered version of the monthly activity report — queues
+          the same Celery task the schedule uses. Returns 503 immediately
+          if Redis is unreachable, instead of hanging.
+
+      - endpoint: /api/admin/companies?q=&status=
+        method: GET
+        description: >
+          Search/list companies by name, optionally filtered by
+          approval_status (pending/approved/rejected).
+
+      - endpoint: /api/admin/companies/{id}/approve
+        method: PUT
+        description: Approve a pending company registration.
+
+      - endpoint: /api/admin/companies/{id}/reject
+        method: PUT
+        description: Reject a pending company registration.
+
+      - endpoint: /api/admin/companies/{id}/blacklist
+        method: PUT
+        description: >
+          Blacklist a company, deactivate its login, and cancel all of its
+          pending/approved drives.
+
+      - endpoint: /api/admin/companies/{id}/unblacklist
+        method: PUT
+        description: Restore a previously blacklisted company.
+
+      - endpoint: /api/admin/companies/{id}
+        method: DELETE
+        description: >
+          Permanently remove a company profile and its login account
+          (hard delete — cannot be undone).
+
+      - endpoint: /api/admin/students?q=
+        method: GET
+        description: >
+          Search/list students by name, roll number, or branch.
+
+      - endpoint: /api/admin/students/{id}/blacklist
+        method: PUT
+        description: Blacklist a student and deactivate their login.
+
+      - endpoint: /api/admin/students/{id}/unblacklist
+        method: PUT
+        description: Restore a previously blacklisted student.
+
+      - endpoint: /api/admin/students/{id}
+        method: DELETE
+        description: >
+          Permanently remove a student profile and its login account
+          (hard delete — cannot be undone).
+
+      - endpoint: /api/admin/drives?q=&status=
+        method: GET
+        description: >
+          Search/list all placement drives across every company, optionally
+          filtered by status (pending/approved/rejected/closed/cancelled).
+
+      - endpoint: /api/admin/drives/{id}/approve
+        method: PUT
+        description: >
+          Approve a pending drive. Blocked if the owning company is not
+          itself approved, or is blacklisted.
+
+      - endpoint: /api/admin/drives/{id}/reject
+        method: PUT
+        description: Reject a pending drive.
+
+      - endpoint: /api/admin/drives/{id}/close
+        method: PUT
+        description: Manually close an approved drive ("mark as complete").
+
+      - endpoint: /api/admin/drives/{id}
+        method: DELETE
+        description: >
+          Permanently remove a placement drive and its applications
+          (hard delete — cannot be undone).
+
+      - endpoint: /api/admin/applications?q=
+        method: GET
+        description: >
+          View every student application across the institute, searchable
+          by student name or job title.
+
+  # ── Company ─────────────────────────────────────────────────────────
+  - group: Company
+    blueprint: routes/company.py
+    auth: "role_required('company')"
+    endpoints:
+      - endpoint: /api/company/profile
+        method: GET
+        description: View the logged-in company's own profile.
+
+      - endpoint: /api/company/profile
+        method: PUT
+        description: Update company profile (name, HR contact, website, description).
+
+      - endpoint: /api/company/drives
+        method: GET
+        description: >
+          List the company's own drives, split into "upcoming"
+          (pending/approved) and "closed" (closed/rejected/cancelled).
+
+      - endpoint: /api/company/drives
+        method: POST
+        description: >
+          Create a new placement drive. Rejected with 403 unless the
+          company itself is admin-approved and not blacklisted.
+
+      - endpoint: /api/company/drives/{id}
+        method: GET
+        description: View one of the company's own drives in detail.
+
+      - endpoint: /api/company/drives/{id}/complete
+        method: PUT
+        description: Mark one of the company's own drives as complete/closed.
+
+      - endpoint: /api/company/drives/{id}/applications
+        method: GET
+        description: List every applicant for one specific drive.
+
+      - endpoint: /api/company/applications/{id}
+        method: GET
+        description: View a single application's full detail.
+
+      - endpoint: /api/company/applications/{id}
+        method: PUT
+        description: >
+          Update an applicant's status (shortlisted / waiting / selected /
+          rejected), interview mode, and remark.
+
+      - endpoint: /api/company/resume/{id}
+        method: GET
+        description: >
+          Download an applicant's résumé — restricted to the company that
+          owns that applicant's drive.
+
+  # ── Student ─────────────────────────────────────────────────────────
+  - group: Student
+    blueprint: routes/student.py
+    auth: "role_required('student')"
+    endpoints:
+      - endpoint: /api/student/profile
+        method: GET
+        description: View the logged-in student's own profile.
+
+      - endpoint: /api/student/profile
+        method: PUT
+        description: Update profile (name, branch, CGPA, year).
+
+      - endpoint: /api/student/resume
+        method: POST
+        description: Upload a résumé (PDF/DOC/DOCX only).
+
+      - endpoint: /api/student/resume
+        method: GET
+        description: Download the student's own uploaded résumé.
+
+      - endpoint: /api/student/drives?q=&eligible_only=
+        method: GET
+        description: >
+          Browse all approved, still-open drives, annotated with
+          eligibility per drive. Optional text search and an
+          eligible-only filter. Backed by a 60s Redis cache.
+
+      - endpoint: /api/student/drives/{id}
+        method: GET
+        description: View one open drive in full detail, with eligibility check.
+
+      - endpoint: /api/student/companies/{id}
+        method: GET
+        description: View a company's public profile and its currently open drives.
+
+      - endpoint: /api/student/drives/{id}/apply
+        method: POST
+        description: >
+          Apply to a drive. Validates blacklist status, deadline, and
+          eligibility (branch/CGPA/year); blocks duplicate applications.
+          Notifies the company by email on success.
+
+      - endpoint: /api/student/applications
+        method: GET
+        description: Full placement history — every application ever made, newest first.
+
+      - endpoint: /api/student/export
+        method: POST
+        description: >
+          Trigger the asynchronous CSV export batch job (Celery). Returns
+          a task_id to poll.
+
+      - endpoint: /api/student/export/{task_id}
+        method: GET
+        description: Poll the status of a triggered export job (PENDING/SUCCESS/FAILURE).
+
+      - endpoint: /api/student/export/download/{filename}
+        method: GET
+        description: >
+          Download the generated CSV once the export job has completed.
+
+  # ── Health check (public) ──────────────────────────────────────────
+  - group: Health
+    blueprint: app.py
+    endpoints:
+      - endpoint: /api/health
+        method: GET
+        description: 'Liveness check — returns { "status": "ok" }.'
