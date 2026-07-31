@@ -4,51 +4,65 @@
   b. monthly_report            — scheduled, HTML activity report mailed to admin
   c. export_applications_csv   — user-triggered async CSV export + completion alert
 """
-import csv
-import os
-from datetime import datetime, timedelta
 
-from flask import current_app
+# ══════════════════════════════════════════════════════════════════════
+# ── IMPORTS ─────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════
+import csv                                    # CSV file likhne ke liye standard library
+import os                                     # file paths banane ke liye (folder + filename join karna)
+from datetime import datetime, timedelta      # date/time calculations ke liye (deadline, timestamps)
 
-from extensions import celery, db
-from models import StudentProfile, PlacementDrive, Application
-from tasks.mailer import send_email
+from flask import current_app                 # Flask ka config (EXPORT_FOLDER, ADMIN_EMAIL) uthane ke liye
+
+from extensions import celery, db             # celery = task register karne ka object, db = database (yaha directly use nahi ho raha)
+from models import StudentProfile, PlacementDrive, Application   # database tables (models)
+from tasks.mailer import send_email           # apna khud ka mail bhejne wala helper function
 
 
-# ── (a) Daily reminder ────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════
+# ── (a) DAILY REMINDER — har raat students ko deadline yaad dilana ───
+# ══════════════════════════════════════════════════════════════════════
 
-@celery.task(name='tasks.daily_reminder')
+@celery.task(name='tasks.daily_reminder')   # ye function ek Celery scheduled task hai (roz 6pm chalega)
 def daily_reminder():
     """Nudge students about drives closing soon that they have not applied to."""
-    window = current_app.config['REMINDER_WINDOW_DAYS']
-    now = datetime.utcnow()
 
+    # Config se number of days uthao jitne din pehle warning deni hai (e.g. 3 din)
+    window = current_app.config['REMINDER_WINDOW_DAYS']
+    now = datetime.utcnow()   # abhi ka UTC time
+
+    # ── Step 1: wo saari drives dhundo jo jald band hone wali hain ──
     closing_soon = (PlacementDrive.query
-                    .filter(PlacementDrive.status == 'approved')
-                    .filter(PlacementDrive.deadline >= now)
-                    .filter(PlacementDrive.deadline <= now + timedelta(days=window))
+                    .filter(PlacementDrive.status == 'approved')            # sirf approved drives
+                    .filter(PlacementDrive.deadline >= now)                 # jinki deadline abhi tak nahi aayi
+                    .filter(PlacementDrive.deadline <= now + timedelta(days=window))  # aur window ke andar aa rahi hai
                     .all())
 
+    # Agar koi drive band hone wali nahi hai, to kaam khatam — kisi ko mail mat bhejo
     if not closing_soon:
         return 'No drives closing soon — no reminders sent.'
 
+    # ── Step 2: har active (blacklist nahi hue) student ko check karo ──
     students = StudentProfile.query.filter_by(is_blacklisted=False).all()
-    sent = 0
+    sent = 0   # kitne students ko mail bheja uska counter
 
     for student in students:
+        # Is student ne jin-jin drive-ids me already apply kar diya hai, unka set banao
         applied_ids = {a.drive_id for a in student.applications}
 
-        # Only remind about drives this student is eligible for and has skipped.
+        # Sirf wo drives jinme student eligible hai AUR abhi tak apply nahi kiya
         pending = [d for d in closing_soon
                    if d.id not in applied_ids and d.check_eligibility(student) is None]
         if not pending:
-            continue
+            continue   # agar koi pending drive nahi hai to is student ko skip karo
 
+        # ── Step 3: HTML table banao jisme pending drives ki list ho ──
         rows = ''.join(
             f'<tr><td>{d.job_title}</td><td>{d.company.company_name}</td>'
             f'<td>{d.deadline.strftime("%d %b %Y")}</td></tr>'
             for d in pending
         )
+        # Poora email ka HTML content taiyar karo
         html = f"""
         <h3>Hello {student.name},</h3>
         <p>You have <b>{len(pending)}</b> placement drive(s) closing within
@@ -59,21 +73,28 @@ def daily_reminder():
         </table>
         <p>Log in to the Placement Portal to apply before the deadline.</p>
         """
+        # ── Step 4: mail bhejo aur counter badhao ──
         send_email(student.user.email, 'Placement drives closing soon', html)
         sent += 1
 
+    # Function ka summary return karo (Celery log/result me dikhega)
     return f'Reminders sent to {sent} student(s) about {len(closing_soon)} drive(s).'
 
 
-# ── (b) Monthly activity report ───────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════
+# ── (b) MONTHLY ACTIVITY REPORT — mahine ka summary admin ko bhejna ──
+# ══════════════════════════════════════════════════════════════════════
 
-@celery.task(name='tasks.monthly_report')
+@celery.task(name='tasks.monthly_report')   # ye bhi scheduled task hai (har mahine ki 1 tareek, 8am)
 def monthly_report():
     """Build last month's activity report and mail it to the admin."""
-    now = datetime.utcnow()
-    this_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    last_month = (this_month - timedelta(days=1)).replace(day=1)
 
+    # ── Step 1: "pichhle mahine" ka date range nikalo ──
+    now = datetime.utcnow()
+    this_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)  # is mahine ki 1 tareek, midnight
+    last_month = (this_month - timedelta(days=1)).replace(day=1)                # pichhle mahine ki 1 tareek
+
+    # ── Step 2: pichhle mahine ki drives aur applications database se nikalo ──
     drives = (PlacementDrive.query
               .filter(PlacementDrive.created_at >= last_month)
               .filter(PlacementDrive.created_at < this_month)
@@ -83,17 +104,21 @@ def monthly_report():
                     .filter(Application.application_date < this_month)
                     .all())
 
-    selected = [a for a in applications if a.status == 'selected']
-    shortlisted = [a for a in applications if a.status == 'shortlisted']
-    applicants = {a.student_id for a in applications}
+    # ── Step 3: kuch summary numbers calculate karo ──
+    selected = [a for a in applications if a.status == 'selected']       # jinko job mil gayi
+    shortlisted = [a for a in applications if a.status == 'shortlisted']  # jinka shortlist hua
+    applicants = {a.student_id for a in applications}                    # kitne unique students ne apply kiya
 
+    # ── Step 4: har drive ki ek row banao HTML table ke liye ──
     drive_rows = ''.join(
         f'<tr><td>{d.drive_name}</td><td>{d.company.company_name}</td>'
         f'<td>{d.job_title}</td><td>{len(d.applications)}</td>'
         f'<td>{sum(1 for a in d.applications if a.status == "selected")}</td></tr>'
         for d in drives
     ) or '<tr><td colspan="5">No drives were conducted this month.</td></tr>'
+    # (agar ek bhi drive nahi thi to "No drives" wala message dikhega)
 
+    # ── Step 5: poora HTML report banao ──
     html = f"""
     <html><body style="font-family:Arial,sans-serif">
       <h2>Monthly Placement Activity Report</h2>
@@ -117,12 +142,13 @@ def monthly_report():
     </body></html>
     """
 
-    # Keep a copy on disk as well as mailing it.
+    # ── Step 6: report ki ek copy disk pe bhi save kar do (backup ke liye) ──
     path = os.path.join(current_app.config['EXPORT_FOLDER'],
                         f'monthly_report_{last_month.strftime("%Y_%m")}.html')
     with open(path, 'w', encoding='utf-8') as handle:
         handle.write(html)
 
+    # ── Step 7: report ko admin ke email pe bhej do ──
     send_email(
         current_app.config['ADMIN_EMAIL'],
         f'Placement Activity Report — {last_month.strftime("%B %Y")}',
@@ -131,38 +157,47 @@ def monthly_report():
     return f'Monthly report for {last_month.strftime("%B %Y")} generated and mailed.'
 
 
-# ── (c) User-triggered CSV export ─────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════
+# ── (c) USER-TRIGGERED CSV EXPORT — student apni history download kare ──
+# ══════════════════════════════════════════════════════════════════════
 
+# Har application status ka ek color (email me badge dikhane ke liye)
 STATUS_COLORS = {
-    'applied': '#3b82f6',
-    'shortlisted': '#0ea5e9',
-    'waiting': '#f59e0b',
-    'selected': '#16a34a',
-    'rejected': '#dc2626',
+    'applied': '#3b82f6',       # blue
+    'shortlisted': '#0ea5e9',   # sky blue
+    'waiting': '#f59e0b',       # orange
+    'selected': '#16a34a',      # green
+    'rejected': '#dc2626',      # red
 }
 
 
-@celery.task(name='tasks.export_applications_csv')
+@celery.task(name='tasks.export_applications_csv')   # ye async task hai, student ke "Export" button dabane pe chalta hai
 def export_applications_csv(student_id):
     """Export one student's placement history, then alert them by email."""
+
+    # ── Step 1: student ko database se dhundo ──
     student = StudentProfile.query.get(student_id)
     if not student:
-        raise ValueError(f'No student with id {student_id}')
+        raise ValueError(f'No student with id {student_id}')   # agar student hi nahi mila to error do
 
+    # ── Step 2: CSV file ka naam aur path banao (timestamp ke saath, taaki unique rahe) ──
     stamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
     filename = f'applications_{student.roll_number or student.id}_{stamp}.csv'
     path = os.path.join(current_app.config['EXPORT_FOLDER'], filename)
 
+    # ── Step 3: is student ki saari applications database se nikalo (date ke hisaab se sorted) ──
     applications = (Application.query
                     .filter_by(student_id=student.id)
                     .order_by(Application.application_date)
                     .all())
 
+    # ── Step 4: CSV ka header row (column names) ──
     header = [
         'Roll Number', 'Student Name', 'Email', 'Branch', 'CGPA',
         'Company Name', 'Drive Title', 'Job Title', 'Application Status',
         'Application Date', 'Deadline', 'Interview Mode', 'Remark',
     ]
+    # Har application ke liye ek row banao (list ke andar list)
     rows = [[
         student.roll_number or student.id,
         student.name,
@@ -179,14 +214,17 @@ def export_applications_csv(student_id):
         a.remark,
     ] for a in applications]
 
+    # ── Step 5: CSV file disk pe likho ──
     with open(path, 'w', newline='', encoding='utf-8') as handle:
         writer = csv.writer(handle)
-        writer.writerow(header)
-        writer.writerows(rows)
+        writer.writerow(header)   # pehle header likho
+        writer.writerows(rows)    # phir saari rows likho
 
+    # ── Step 6: usi CSV file ko bytes me wapas padho (email attachment ke liye chahiye) ──
     with open(path, 'rb') as handle:
         csv_bytes = handle.read()
 
+    # ── Step 7: email ke andar dikhane ke liye ek HTML table banao (preview jaisa) ──
     table_rows = ''.join(
         f"""<tr>
               <td style="padding:10px 14px;border-bottom:1px solid #eef0f3">{a.drive.company.company_name}</td>
@@ -201,7 +239,9 @@ def export_applications_csv(student_id):
             </tr>"""
         for a in applications
     ) or '<tr><td colspan="4" style="padding:14px;color:#6b7280">No applications yet.</td></tr>'
+    # (agar koi application hi nahi hai to "No applications yet" dikhega)
 
+    # ── Step 8: poora email ka HTML design taiyar karo ──
     html = f"""
     <div style="font-family:Segoe UI,Arial,sans-serif;max-width:640px;margin:auto;
                 background:#f4f6f9;padding:24px">
@@ -247,11 +287,12 @@ def export_applications_csv(student_id):
     </div>
     """
 
-    # The "alert once done" the spec asks for, with the CSV attached.
+    # ── Step 9: student ko mail bhejo, CSV file ko attachment ke roop me jodo ──
+    # Yahi wo "alert once done" hai jo spec me maanga gaya tha
     send_email(
         student.user.email,
         'Your placement history export is ready',
         html,
         attachments=[(filename, csv_bytes, 'csv')],
     )
-    return filename
+    return filename   # Celery task result me filename return ho jayega (frontend isse poll karta hai)
